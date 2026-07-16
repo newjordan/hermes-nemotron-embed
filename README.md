@@ -2,6 +2,10 @@
 
 [![CI](https://github.com/newjordan/hermes-nemotron-embed/actions/workflows/ci.yml/badge.svg)](https://github.com/newjordan/hermes-nemotron-embed/actions/workflows/ci.yml)
 
+<p align="center">
+  <img src="art/embedhead-design-review-1967.png" alt="Embedhead — local semantic context for Hermes" width="720">
+</p>
+
 A standalone [Hermes Agent](https://github.com/NousResearch/hermes-agent)
 context engine that uses a locally served NVIDIA Nemotron 3 Embed model to
 retain query-relevant conversation turns when the context window fills.
