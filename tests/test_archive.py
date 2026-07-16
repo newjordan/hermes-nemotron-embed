@@ -63,6 +63,27 @@ def test_archive_falls_back_to_lexical_search(tmp_path):
     assert results[0].score == 1.0
 
 
+def test_vector_search_keeps_valid_negative_cosine_matches(tmp_path):
+    archive = ContextArchive(tmp_path / "archive.db")
+    chunk_id = archive.store(
+        session_id="s1",
+        sequence=0,
+        text="semantically nearest without lexical overlap",
+        messages=[{"role": "assistant", "content": "nearest context"}],
+        embedding=[-1.0, 0.0],
+    )
+
+    results = archive.search(
+        session_id="s1",
+        query="completely different terms",
+        embedding=[1.0, 0.0],
+        limit=3,
+    )
+
+    assert [item.chunk_id for item in results] == [chunk_id]
+    assert results[0].score == -1.0
+
+
 def test_archive_database_is_owner_only(tmp_path):
     archive = ContextArchive(tmp_path / "state" / "archive.db")
     archive.store(

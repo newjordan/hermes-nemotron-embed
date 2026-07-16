@@ -130,7 +130,10 @@ class ContextArchive:
                     vector_score = dot_product(embedding, stored)
             lexical_score = _lexical_score(query_terms, _terms(row[3]))
             score = vector_score if vector_score is not None else lexical_score
-            if score <= 0 and query_terms:
+            # A negative cosine is still a valid nearest-neighbor score. Only
+            # suppress rows when retrieval has fallen back to lexical matching
+            # and there is no term overlap at all.
+            if vector_score is None and lexical_score <= 0 and query_terms:
                 continue
             try:
                 messages = json.loads(row[4])

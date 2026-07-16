@@ -276,12 +276,16 @@ class NemotronEmbedEngine(ContextEngine):
             backend = "nemotron"
         except (EmbeddingError, IndexError, ValueError):
             pass
-        results = self._archive.search(
-            session_id=self._session_id or "unknown-session",
-            query=query,
-            embedding=query_vector,
-            limit=limit,
-        )
+        try:
+            results = self._archive.search(
+                session_id=self._session_id or "unknown-session",
+                query=query,
+                embedding=query_vector,
+                limit=limit,
+            )
+        except (OSError, sqlite3.Error) as exc:
+            logger.warning("Could not search archived context: %s", exc)
+            return json.dumps({"success": False, "error": "context archive is unavailable"})
         return json.dumps(
             {
                 "success": True,
@@ -301,6 +305,10 @@ class NemotronEmbedEngine(ContextEngine):
 
     def get_status(self) -> dict[str, Any]:
         status = super().get_status()
+        try:
+            archived_chunks = self._archive.count(self._session_id or None)
+        except (OSError, sqlite3.Error):
+            archived_chunks = None
         status.update(
             {
                 "engine": self.name,
@@ -308,7 +316,7 @@ class NemotronEmbedEngine(ContextEngine):
                 "last_compaction_backend": self._last_backend,
                 "last_before_tokens": self._last_before_tokens,
                 "last_after_tokens": self._last_after_tokens,
-                "archived_chunks": self._archive.count(self._session_id or None),
+                "archived_chunks": archived_chunks,
             }
         )
         return status

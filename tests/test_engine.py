@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 
 from hermes_plugins.nemotron_embed_test.archive import ContextArchive
 from hermes_plugins.nemotron_embed_test.client import EmbeddingError
@@ -18,6 +19,14 @@ class _SemanticClient:
 class _UnavailableClient:
     def embed(self, _input_type, _texts):
         raise EmbeddingError("offline")
+
+
+class _UnavailableArchive:
+    def search(self, **_kwargs):
+        raise sqlite3.OperationalError("database is locked")
+
+    def count(self, _session_id=None):
+        raise sqlite3.OperationalError("database is locked")
 
 
 def _settings(tmp_path, **overrides):
@@ -113,6 +122,25 @@ def test_search_tool_rejects_empty_query(tmp_path):
     engine = NemotronEmbedEngine(_settings(tmp_path), client=_SemanticClient())
     response = json.loads(engine.handle_tool_call("nemotron_context_search", {}))
     assert response == {"success": False, "error": "query is required"}
+
+
+def test_archive_failure_is_reported_without_breaking_agent_status(tmp_path):
+    engine = NemotronEmbedEngine(
+        _settings(tmp_path),
+        client=_UnavailableClient(),
+        archive=_UnavailableArchive(),
+    )
+    engine.on_session_start("session")
+
+    response = json.loads(
+        engine.handle_tool_call("nemotron_context_search", {"query": "lost detail"})
+    )
+
+    assert response == {
+        "success": False,
+        "error": "context archive is unavailable",
+    }
+    assert engine.get_status()["archived_chunks"] is None
 
 
 def test_host_force_keyword_preserves_manual_focus_topic(tmp_path):
