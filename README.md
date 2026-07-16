@@ -1,4 +1,4 @@
-# Hermes Nemotron Embed
+# Embedhead — Hermes Nemotron Embed
 
 [![CI](https://github.com/newjordan/hermes-nemotron-embed/actions/workflows/ci.yml/badge.svg)](https://github.com/newjordan/hermes-nemotron-embed/actions/workflows/ci.yml)
 
@@ -16,6 +16,29 @@ decides which older turns still deserve scarce model context.
 It is not a replacement for Hermes' reasoning model. It reduces the context
 sent to that model after compaction is due, keeps the local embedding workload
 off paid APIs, and archives omitted turns for later semantic recovery.
+
+## Where it fits
+
+Embedhead is deliberately narrow. It is not the first retrieval-oriented
+context engine for Hermes, and it does not try to be a complete memory or
+grounding system. Its job is to make one deployment pattern simple: use a local
+NVIDIA Nemotron embedding model to choose which complete conversation turns
+remain in the active context when Hermes compacts it.
+
+The closest broader alternative is
+[hermes-cmx](https://github.com/arminanton/hermes-cmx), which combines verbatim
+history, FTS5, trigram and embedding retrieval, every-turn context injection,
+optional response grounding, and SQLite or Postgres storage. Choose CMX when
+you want that full retrieval and enforcement stack. Choose Embedhead when you
+want a smaller Nemotron-specific engine with no auxiliary summarization or
+verification-model call in its compaction path.
+
+| Option | Primary mechanism | Best fit |
+|---|---|---|
+| **Embedhead** | Local Nemotron similarity selects atomic turns at compaction; omitted turns remain searchable in SQLite | NVIDIA GPU users who want a focused, local embedding sidecar |
+| [hermes-cmx](https://github.com/arminanton/hermes-cmx) | Hybrid lexical/vector retrieval, verbatim assembly, every-turn injection, optional grounding | Full retrieval-first memory and evidence enforcement |
+| [hermes-cursor-compressor](https://github.com/thiswind/hermes-cursor-compressor) | Cursor-style LLM summarization with JSONL history | A smaller alternative summarizer without semantic embeddings |
+| Hermes built-in | Auxiliary-LLM summary plus the normal session transcript/search surfaces | Zero additional services and the default supported behavior |
 
 ## Install and activate
 
@@ -45,6 +68,13 @@ and `DO_NOT_TRACK=1`).
 - Linux or WSL2 for managed vLLM startup
 - `uv`/`uvx`
 - A CUDA-capable NVIDIA GPU and a compatible driver
+
+> [!IMPORTANT]
+> Version 0.1 is a public preview. Host integration, failure handling, archive
+> behavior, and the vLLM protocol boundary are covered by automated tests on
+> Python 3.11–3.13. Those deterministic tests do not replace a live GPU check;
+> run `hermes nemotron-embed benchmark` against your server before relying on
+> it for an important session.
 
 The automated compatibility suite currently tests Python 3.11–3.13 against
 Hermes Agent 0.18.2 at commit `74fc222f17d5fa10400dbd35d75d45f5ae75df8c`.
@@ -182,6 +212,17 @@ deploying a checkpoint:
 
 - [Nemotron-3-Embed-1B-BF16](https://huggingface.co/nvidia/Nemotron-3-Embed-1B-BF16)
 - [Nemotron-3-Embed-8B-BF16](https://huggingface.co/nvidia/Nemotron-3-Embed-8B-BF16)
+
+## Related Hermes projects
+
+- [hermes-cmx](https://github.com/arminanton/hermes-cmx) — retrieval-first,
+  verbatim context assembly with hybrid search and optional grounding.
+- [hermes-cursor-compressor](https://github.com/thiswind/hermes-cursor-compressor)
+  — Cursor-style summarization and searchable JSONL history.
+- [hermes-mastra](https://github.com/srinitude/hermes-mastra) — a broader Mastra
+  memory provider with semantic-search tools and an optional context wrapper.
+- [Hermes context-engine documentation](https://github.com/NousResearch/hermes-agent/blob/main/website/docs/developer-guide/context-engine-plugin.md)
+  — the host contract implemented by this plugin.
 
 ## Development
 
