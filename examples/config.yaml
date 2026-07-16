@@ -1,0 +1,14 @@
+nemotron_embed:
+  endpoint: http://127.0.0.1:8089/v2/embed
+  model: nvidia/Nemotron-3-Embed-1B-BF16
+  threshold: 0.75
+  target_ratio: 0.35
+  protect_first_turns: 1
+  protect_last_turns: 4
+  request_timeout: 120
+  embedding_dimensions: 1024
+  max_chunk_chars: 12000
+  recency_weight: 0.05
+
+context:
+  engine: nemotron-embed

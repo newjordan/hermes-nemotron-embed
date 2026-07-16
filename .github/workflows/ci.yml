@@ -1,0 +1,75 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Python ${{ matrix.python-version }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
+
+    steps:
+      - name: Checkout plugin
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Checkout tested Hermes host
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          repository: NousResearch/hermes-agent
+          ref: 74fc222f17d5fa10400dbd35d75d45f5ae75df8c
+          path: .hermes-agent
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
+        with:
+          enable-cache: true
+          cache-dependency-glob: .hermes-agent/uv.lock
+
+      - name: Install Python
+        run: uv python install ${{ matrix.python-version }}
+
+      - name: Install Hermes and test dependencies
+        run: >-
+          uv sync --project .hermes-agent --locked
+          --python ${{ matrix.python-version }} --extra dev
+
+      - name: Run tests
+        env:
+          PYTHONPATH: ${{ github.workspace }}/.hermes-agent
+        run: .hermes-agent/.venv/bin/python -m pytest
+
+      - name: Compile plugin sources
+        run: >-
+          .hermes-agent/.venv/bin/python -m compileall -q
+          __init__.py archive.py benchmark.py cli.py client.py engine.py server.py settings.py
+          evals tests
+
+  lint:
+    name: Ruff
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout plugin
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
+
+      - name: Lint and check formatting
+        run: |
+          uvx ruff check .
+          uvx ruff format --check .

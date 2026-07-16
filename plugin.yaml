@@ -1,0 +1,8 @@
+manifest_version: 1
+name: nemotron-embed
+version: "0.1.0"
+description: Local Nemotron semantic context compaction for Hermes Agent
+author: newjordan
+kind: standalone
+provides_tools:
+  - nemotron_context_search
