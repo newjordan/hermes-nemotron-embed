@@ -110,9 +110,15 @@ class NemotronEmbedEngine(ContextEngine):
         current_tokens: int | None = None,
         focus_topic: str | None = None,
         force: bool = False,
+        memory_context: str = "",
     ) -> list[dict[str, Any]]:
-        """Select relevant atomic turns, archiving every evicted turn locally."""
-        del force
+        """Select relevant atomic turns, archiving every evicted turn locally.
+
+        ``memory_context`` is accepted so newer Hermes hosts can pass provider
+        memory without a TypeError. It is not added to the retrieval query:
+        that text is not one of the conversation turns being kept or archived.
+        """
+        del force, memory_context
         if not messages:
             return messages
 
@@ -223,6 +229,7 @@ class NemotronEmbedEngine(ContextEngine):
         self._session_id = ""
         self._last_before_tokens = 0
         self._last_after_tokens = 0
+        self._last_backend = "not-run"
 
     def get_tool_schemas(self) -> list[dict[str, Any]]:
         return [
@@ -264,10 +271,14 @@ class NemotronEmbedEngine(ContextEngine):
         query = str(args.get("query") or "").strip()
         if not query:
             return json.dumps({"success": False, "error": "query is required"})
-        try:
-            limit = max(1, min(int(args.get("limit", 3)), 8))
-        except (TypeError, ValueError):
+        raw_limit = args.get("limit", 3)
+        if isinstance(raw_limit, bool):
             limit = 3
+        else:
+            try:
+                limit = max(1, min(int(raw_limit), 8))
+            except (TypeError, ValueError):
+                limit = 3
 
         query_vector: Sequence[float] | None = None
         backend = "lexical"
@@ -296,6 +307,7 @@ class NemotronEmbedEngine(ContextEngine):
                         "sequence": item.sequence,
                         "score": round(item.score, 4),
                         "content": item.text[:4000],
+                        "truncated": len(item.text) > 4000,
                     }
                     for item in results
                 ],
@@ -370,7 +382,7 @@ def _render_group(messages: list[dict[str, Any]]) -> str:
         content = _content_text(message.get("content"))
         tool_calls = message.get("tool_calls")
         if tool_calls:
-            content = f"{content}\ntool_calls: {json.dumps(tool_calls, ensure_ascii=False)}"
+            content = f"{content}\ntool_calls: {_json_text(tool_calls)}"
         parts.append(f"{role}: {content}".strip())
     return "\n".join(parts)
 
@@ -393,6 +405,13 @@ def _content_text(content: Any) -> str:
     return str(content)
 
 
+def _json_text(value: Any) -> str:
+    try:
+        return json.dumps(value, ensure_ascii=False, default=str)
+    except (TypeError, ValueError):
+        return str(value)
+
+
 def _latest_user_text(messages: list[dict[str, Any]]) -> str:
     for message in reversed(messages):
         if message.get("role") == "user":
@@ -405,7 +424,10 @@ def _latest_user_text(messages: list[dict[str, Any]]) -> str:
 def _estimate_messages_tokens(messages: list[dict[str, Any]]) -> int:
     if not messages:
         return 0
-    serialized = json.dumps(messages, ensure_ascii=False, separators=(",", ":"))
+    try:
+        serialized = json.dumps(messages, ensure_ascii=False, separators=(",", ":"), default=str)
+    except (TypeError, ValueError):
+        serialized = str(messages)
     return max(1, len(serialized) // 4 + len(messages) * 4)
 
 

@@ -1,6 +1,9 @@
+# Example profile settings. api_key_env names an environment variable.
+# Put the token in that variable, not in this file.
 nemotron_embed:
   endpoint: http://127.0.0.1:8089/v2/embed
   model: nvidia/Nemotron-3-Embed-1B-BF16
+  api_key_env: NEMOTRON_EMBED_API_KEY
   threshold: 0.75
   target_ratio: 0.35
   protect_first_turns: 1

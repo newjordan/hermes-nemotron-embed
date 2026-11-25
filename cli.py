@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from typing import Any
 
 from .server import ServerManager
@@ -16,7 +17,7 @@ MODEL_PRESETS = {
 
 
 def setup_argparse(parser: argparse.ArgumentParser) -> None:
-    subcommands = parser.add_subparsers(dest="nemotron_command")
+    subcommands = parser.add_subparsers(dest="nemotron_command", required=True)
 
     setup = subcommands.add_parser("setup", help="Configure and optionally start local serving")
     setup.add_argument(
@@ -71,7 +72,10 @@ def dispatch(args: argparse.Namespace) -> None:
     elif command == "benchmark":
         _benchmark()
     else:
-        print("Usage: hermes nemotron-embed <setup|start|stop|status|benchmark>")
+        print(
+            "Usage: hermes nemotron-embed <setup|start|stop|status|benchmark>",
+            file=sys.stderr,
+        )
 
 
 def _setup(args: argparse.Namespace) -> None:
@@ -110,9 +114,14 @@ def _setup(args: argparse.Namespace) -> None:
         config["context"] = context
     context["engine"] = "nemotron-embed"
     save_config(config)
-    print("Configured context.engine = nemotron-embed")
-    print(f"Embedding model: {model}")
-    print(f"Endpoint: {args.endpoint}")
+    key_state = "set" if validated.api_key else "unset"
+    print("nemotron-embed configured")
+    print("  context.engine  nemotron-embed")
+    print(f"  model           {validated.model}")
+    print(f"  endpoint        {validated.endpoint}")
+    print(f"  threshold       {validated.threshold_percent:g}")
+    print(f"  target ratio    {validated.target_ratio:g}")
+    print(f"  api key env     {validated.api_key_env} ({key_state})")
     if args.start:
         _start(
             argparse.Namespace(
@@ -121,7 +130,7 @@ def _setup(args: argparse.Namespace) -> None:
             )
         )
     else:
-        print("Start local serving with: hermes nemotron-embed start")
+        print("Start the local server with: hermes nemotron-embed start")
 
 
 def _start(args: argparse.Namespace) -> None:
@@ -139,11 +148,16 @@ def _stop(args: argparse.Namespace) -> None:
 
 
 def _status() -> None:
-    settings = load_settings()
+    settings = _require_settings()
     status = _manager(settings).status()
     payload: dict[str, Any] = {
         "engine": "nemotron-embed",
         "active": _active_engine() == "nemotron-embed",
+        "model": settings.model,
+        "endpoint": settings.endpoint,
+        "api_key_env": settings.api_key_env,
+        "api_key_configured": bool(settings.api_key),
+        "archive": str(settings.archive_path),
         "server": {
             "running": status.running,
             "healthy": status.healthy,
@@ -159,16 +173,27 @@ def _status() -> None:
 def _benchmark() -> None:
     from .benchmark import run_compaction_benchmark
 
-    result = run_compaction_benchmark(load_settings())
+    result = run_compaction_benchmark(_require_settings())
     print(json.dumps(result, indent=2))
+    verdict = "passed" if result["passed"] else "failed"
+    print(f"benchmark {verdict}", file=sys.stderr)
     if not result["passed"]:
         raise RuntimeError("Nemotron Embed compaction benchmark failed")
+
+
+def _require_settings():
+    try:
+        return load_settings()
+    except ValueError as exc:
+        print(f"Invalid nemotron_embed configuration: {exc}", file=sys.stderr)
+        print("Repair it with: hermes nemotron-embed setup", file=sys.stderr)
+        raise
 
 
 def _manager(settings=None) -> ServerManager:
     from hermes_constants import get_hermes_home
 
-    active = settings or load_settings()
+    active = _require_settings() if settings is None else settings
     return ServerManager(active, state_dir=get_hermes_home() / "nemotron-embed")
 
 
@@ -180,8 +205,17 @@ def _active_engine() -> str:
 
 
 def _format_status(status) -> str:
-    state = "healthy" if status.healthy else "starting" if status.running else "stopped"
-    pid = f" (pid {status.pid})" if status.pid else ""
+    if status.running and status.healthy:
+        state = f"managed and healthy (pid {status.pid})"
+    elif status.running:
+        state = f"managed and starting (pid {status.pid})"
+    elif status.healthy:
+        state = "external endpoint reachable"
+    else:
+        state = "stopped"
     return (
-        f"Nemotron Embed server: {state}{pid}\nEndpoint: {status.endpoint}\nLog: {status.log_path}"
+        f"Nemotron Embed server: {state}\n"
+        f"Endpoint: {status.endpoint}\n"
+        f"Model: {status.model}\n"
+        f"Log: {status.log_path}"
     )

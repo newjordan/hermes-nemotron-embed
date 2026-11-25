@@ -14,10 +14,11 @@ import math
 import os
 import statistics
 import time
+import urllib.request
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
-from urllib.request import Request, urlopen
+from urllib.request import Request
 
 MODEL = "nvidia/Nemotron-3-Embed-1B-BF16"
 ENDPOINT = "http://127.0.0.1:8089/v2/embed"
@@ -127,12 +128,15 @@ def _embed(
         method="POST",
     )
     started = time.perf_counter()
-    with urlopen(request, timeout=timeout) as response:
+    with _open(request, timeout) as response:
         data = json.loads(response.read().decode())
     elapsed_ms = (time.perf_counter() - started) * 1000
 
-    raw_vectors = data["embeddings"]["float"]
-    if len(raw_vectors) != len(texts):
+    try:
+        raw_vectors = data["embeddings"]["float"]
+    except (KeyError, TypeError) as exc:
+        raise RuntimeError("embedding response is missing embeddings.float") from exc
+    if not isinstance(raw_vectors, list) or len(raw_vectors) != len(texts):
         raise RuntimeError("embedding response count does not match request")
     native_dimensions = len(raw_vectors[0]) if raw_vectors else 0
     vectors = [_normalize(vector[:dimensions]) for vector in raw_vectors]
@@ -149,6 +153,63 @@ def _normalize(values: list[Any]) -> list[float]:
 
 def _dot(left: list[float], right: list[float]) -> float:
     return sum(a * b for a, b in zip(left, right, strict=True))
+
+
+class _RejectRedirects(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        raise RuntimeError(f"embedding server returned HTTP {code} redirect; refusing to follow it")
+
+
+def _open(request: Request, timeout: float):
+    opener = urllib.request.build_opener(
+        urllib.request.ProxyHandler({}),
+        _RejectRedirects,
+    )
+    return opener.open(request, timeout=timeout)
+
+
+def score_retrieval(
+    *,
+    query_vectors: list[list[float]],
+    document_vectors: list[list[float]],
+    relevant_indices: list[int],
+    case_ids: list[str],
+) -> dict[str, Any]:
+    """Rank each query against the shared corpus and summarize retrieval."""
+    if not query_vectors:
+        raise RuntimeError("retrieval eval requires at least one case")
+    ranks: list[int] = []
+    margins: list[float] = []
+    case_results: list[dict[str, Any]] = []
+    for case_id, query_vector, relevant_index in zip(
+        case_ids, query_vectors, relevant_indices, strict=True
+    ):
+        scores = [_dot(query_vector, vector) for vector in document_vectors]
+        order = sorted(range(len(scores)), key=scores.__getitem__, reverse=True)
+        rank = order.index(relevant_index) + 1
+        others = [score for index, score in enumerate(scores) if index != relevant_index]
+        best_other = max(others) if others else 0.0
+        margin = scores[relevant_index] - best_other
+        ranks.append(rank)
+        margins.append(margin)
+        case_results.append(
+            {
+                "id": case_id,
+                "rank": rank,
+                "relevant_score": round(scores[relevant_index], 6),
+                "top_margin": round(margin, 6),
+            }
+        )
+    count = len(ranks)
+    return {
+        "metrics": {
+            "recall_at_1": sum(rank <= 1 for rank in ranks) / count,
+            "recall_at_3": sum(rank <= 3 for rank in ranks) / count,
+            "mrr": statistics.fmean(1 / rank for rank in ranks),
+            "mean_top_margin": statistics.fmean(margins),
+        },
+        "results": case_results,
+    }
 
 
 def evaluate(args: argparse.Namespace) -> dict[str, Any]:
@@ -180,50 +241,28 @@ def evaluate(args: argparse.Namespace) -> dict[str, Any]:
     if native_dimensions != query_native_dimensions:
         raise RuntimeError("query and document vector dimensions differ")
 
-    ranks: list[int] = []
-    margins: list[float] = []
-    case_results: list[dict[str, Any]] = []
-    for case, query_vector, relevant_index in zip(
-        CASES, query_vectors, relevant_indices, strict=True
-    ):
-        scores = [_dot(query_vector, vector) for vector in document_vectors]
-        order = sorted(range(len(scores)), key=scores.__getitem__, reverse=True)
-        rank = order.index(relevant_index) + 1
-        best_other = max(score for index, score in enumerate(scores) if index != relevant_index)
-        margin = scores[relevant_index] - best_other
-        ranks.append(rank)
-        margins.append(margin)
-        case_results.append(
-            {
-                "id": case["id"],
-                "rank": rank,
-                "relevant_score": round(scores[relevant_index], 6),
-                "top_margin": round(margin, 6),
-            }
-        )
-
-    count = len(ranks)
+    scored = score_retrieval(
+        query_vectors=query_vectors,
+        document_vectors=document_vectors,
+        relevant_indices=relevant_indices,
+        case_ids=[case["id"] for case in CASES],
+    )
     return {
         "schema_version": 1,
         "generated_at": datetime.now(UTC).isoformat(),
         "label": args.label,
         "model": args.model,
         "endpoint_path": "/v2/embed",
-        "cases": count,
+        "cases": len(CASES),
         "corpus_documents": len(documents),
         "native_dimensions": native_dimensions,
         "evaluated_dimensions": len(document_vectors[0]),
-        "metrics": {
-            "recall_at_1": sum(rank <= 1 for rank in ranks) / count,
-            "recall_at_3": sum(rank <= 3 for rank in ranks) / count,
-            "mrr": statistics.fmean(1 / rank for rank in ranks),
-            "mean_top_margin": statistics.fmean(margins),
-        },
+        "metrics": scored["metrics"],
         "latency_ms": {
             "documents_batch": round(document_ms, 2),
             "queries_batch": round(query_ms, 2),
         },
-        "results": case_results,
+        "results": scored["results"],
     }
 
 

@@ -24,3 +24,8 @@ def test_defaults_are_profile_scoped(tmp_path):
 def test_rejects_unsafe_or_incoherent_config(tmp_path, raw, message):
     with pytest.raises(ValueError, match=message):
         NemotronSettings.from_mapping(raw, hermes_home=tmp_path)
+
+
+def test_rejects_boolean_timeout(tmp_path):
+    with pytest.raises(ValueError, match="request_timeout"):
+        NemotronSettings.from_mapping({"request_timeout": True}, hermes_home=tmp_path)

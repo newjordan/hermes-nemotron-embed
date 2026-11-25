@@ -6,32 +6,22 @@
   <img src="art/embedhead-design-review-1967.png" alt="Embedhead — local semantic context for Hermes" width="720">
 </p>
 
-A standalone [Hermes Agent](https://github.com/NousResearch/hermes-agent)
-context engine that uses a locally served NVIDIA Nemotron 3 Embed model to
-retain query-relevant conversation turns when the context window fills.
+Embedhead is a standalone [Hermes Agent](https://github.com/NousResearch/hermes-agent)
+context engine. When a conversation reaches the compaction threshold, it asks a
+local NVIDIA Nemotron 3 Embed server which older turns still match the current
+request, keeps those turns intact, and stores the omitted turns in a
+profile-local SQLite archive so Hermes can search them later.
 
-Think of it as an **Embedhead** for Hermes: a local retrieval sidecar that
-decides which older turns still deserve scarce model context.
-
-It is not a replacement for Hermes' reasoning model. It reduces the context
-sent to that model after compaction is due, keeps the local embedding workload
-off paid APIs, and archives omitted turns for later semantic recovery.
+It does not replace Hermes' reasoning model and it does not summarize with an
+auxiliary LLM. Compaction is a retrieval decision over whole turns. The
+embedding call stays on the endpoint you configure, which defaults to loopback.
 
 ## Where it fits
 
-Embedhead is deliberately narrow. It is not the first retrieval-oriented
-context engine for Hermes, and it does not try to be a complete memory or
-grounding system. Its job is to make one deployment pattern simple: use a local
-NVIDIA Nemotron embedding model to choose which complete conversation turns
-remain in the active context when Hermes compacts it.
-
-The closest broader alternative is
-[hermes-cmx](https://github.com/arminanton/hermes-cmx), which combines verbatim
-history, FTS5, trigram and embedding retrieval, every-turn context injection,
-optional response grounding, and SQLite or Postgres storage. Choose CMX when
-you want that full retrieval and enforcement stack. Choose Embedhead when you
-want a smaller Nemotron-specific engine with no auxiliary summarization or
-verification-model call in its compaction path.
+Embedhead is a narrow sidecar. It is not a full memory system. Its job is one
+deployment pattern: use a local Nemotron embedding model to choose which
+complete conversation turns remain in the active context when Hermes compacts
+it.
 
 | Option | Primary mechanism | Best fit |
 |---|---|---|
@@ -40,6 +30,22 @@ verification-model call in its compaction path.
 | [hermes-cursor-compressor](https://github.com/thiswind/hermes-cursor-compressor) | Cursor-style LLM summarization with JSONL history | A smaller alternative summarizer without semantic embeddings |
 | Hermes built-in | Auxiliary-LLM summary plus the normal session transcript/search surfaces | Zero additional services and the default supported behavior |
 
+## Requirements
+
+- Hermes Agent with context-engine plugin support. CI tests this plugin against Hermes Agent 0.18.2 at commit `74fc222f17d5fa10400dbd35d75d45f5ae75df8c` on Python 3.11, 3.12, and 3.13.
+- `uv` / `uvx` for managed startup.
+- Linux or WSL2, a CUDA-capable NVIDIA GPU, and a compatible driver, when this plugin starts vLLM for you.
+
+An endpoint you already run can be anywhere the plugin can reach. The managed
+`start` command refuses anything except an `http` loopback URL whose path is
+`/v2/embed`.
+
+Version 0.1.1 is a public preview. The automated tests use a fake embedding
+client, temporary SQLite databases, and loopback HTTP servers. They do not
+download weights and they do not measure a live GPU. Before relying on a
+server for an important session, run `hermes nemotron-embed benchmark`
+against that server.
+
 ## Install and activate
 
 ```bash
@@ -47,57 +53,55 @@ hermes plugins install newjordan/hermes-nemotron-embed --enable
 hermes nemotron-embed setup --start
 ```
 
-The setup command performs both activation steps: it writes the plugin settings
-and selects `context.engine: nemotron-embed`. Restart a long-running gateway so
-new sessions use it:
+`setup` validates the requested settings, writes them into the active profile's
+`config.yaml`, and selects `context.engine: nemotron-embed`. Restart a
+long-running gateway so new sessions pick up the engine:
 
 ```bash
 hermes gateway restart
 hermes nemotron-embed status
 ```
 
-Managed serving uses `uvx` and NVIDIA's validated `vllm==0.25.0`. It binds to
-`127.0.0.1` only. The first start downloads vLLM and the selected Hugging Face
-checkpoint, which can take several minutes and substantial disk space.
-Managed startup also disables vLLM usage telemetry (`VLLM_NO_USAGE_STATS=1`
-and `DO_NOT_TRACK=1`).
+Managed serving uses `uvx` and `vllm==0.25.0`, the release named on the
+Nemotron 3 Embed model card for `/v2/embed`. The process binds to `127.0.0.1`
+(or `::1` when that is the configured host) and listens on the port in the
+endpoint. The first start downloads vLLM and the selected Hugging Face
+checkpoint. Managed startup also sets `VLLM_NO_USAGE_STATS=1` and
+`DO_NOT_TRACK=1` in the child environment.
 
-### Requirements
-
-- A Hermes Agent release with context-engine plugin support
-- Linux or WSL2 for managed vLLM startup
-- `uv`/`uvx`
-- A CUDA-capable NVIDIA GPU and a compatible driver
-
-> [!IMPORTANT]
-> Version 0.1 is a public preview. Host integration, failure handling, archive
-> behavior, and the vLLM protocol boundary are covered by automated tests on
-> Python 3.11–3.13. Those deterministic tests do not replace a live GPU check;
-> run `hermes nemotron-embed benchmark` against your server before relying on
-> it for an important session.
-
-The automated compatibility suite currently tests Python 3.11–3.13 against
-Hermes Agent 0.18.2 at commit `74fc222f17d5fa10400dbd35d75d45f5ae75df8c`.
-Hermes moves quickly, so plugin CI pins the tested host revision rather than
-silently changing behavior underneath a release.
-
-The default `1b` preset is the practical local option:
-`nvidia/Nemotron-3-Embed-1B-BF16`. Select the higher-quality 8B checkpoint on
-hardware with sufficient memory:
+The default `1b` preset is `nvidia/Nemotron-3-Embed-1B-BF16`. The `8b` preset
+is `nvidia/Nemotron-3-Embed-8B-BF16`:
 
 ```bash
 hermes nemotron-embed setup --model 8b --start
 ```
 
+`--model` also accepts a full Hugging Face model id.
+
+The managed command is:
+
+```bash
+uvx --from vllm==0.25.0 vllm serve MODEL \
+  --runner pooling \
+  --host 127.0.0.1 \
+  --port PORT \
+  --served-model-name MODEL
+```
+
+`--convert embed` is omitted on purpose. Nemotron 3 Embed is already a pooling
+checkpoint. Passing `--convert embed` asks vLLM to replace that pooler. The
+model card's own serve example is `vllm serve MODEL`; `--runner pooling` only
+forces the embedding runner.
+
 ## Use an existing server
 
-The plugin speaks NVIDIA's recommended vLLM `/v2/embed` retrieval API. To use a
-server you already manage:
+The plugin speaks the vLLM `/v2/embed` retrieval API (`input_type` of `query`
+or `document`, `embedding_types: ["float"]`, `truncate: "END"`). Point setup
+at a server you already manage:
 
 ```bash
 vllm serve nvidia/Nemotron-3-Embed-1B-BF16 \
   --runner pooling \
-  --convert embed \
   --host 127.0.0.1 \
   --port 8000
 
@@ -105,11 +109,8 @@ hermes nemotron-embed setup \
   --endpoint http://127.0.0.1:8000/v2/embed
 ```
 
-The endpoint can be remote when you manage it yourself. The plugin's `start`
-command deliberately refuses non-loopback endpoints.
-
 For a server protected by vLLM's API-key middleware, keep the token in the
-active Hermes profile's `.env`, not in `config.yaml`:
+environment. The profile config stores the variable name only:
 
 ```bash
 hermes config set NEMOTRON_EMBED_API_KEY your-token
@@ -118,28 +119,45 @@ hermes nemotron-embed setup \
   --api-key-env NEMOTRON_EMBED_API_KEY
 ```
 
-## How token reduction works
+`status` reports `api_key_configured` and never prints the token. Requests do
+not follow HTTP redirects and do not use `HTTP_PROXY` / `HTTPS_PROXY`, so a
+configured loopback endpoint cannot be replayed at another origin by a proxy
+or a 307.
+
+## How compaction works
 
 When Hermes reaches the configured context threshold, the engine:
 
-1. Splits history into atomic user turns, keeping each assistant/tool chain
-   together.
-2. Always preserves the initial and most recent turn groups.
-3. Embeds the current request as a query and older turn groups as documents.
-4. Keeps the most relevant groups within the target token budget, restoring
-   chronological order before the next model request.
-5. Stores omitted groups and their embeddings in profile-local SQLite.
+1. Splits history into atomic user turns and keeps each assistant/tool chain with its user message. Leading non-user messages stay in a preamble that is always kept.
+2. Always preserves the first `protect_first_turns` groups and the last `protect_last_turns` groups.
+3. Embeds the current request (or the manual `/compress` focus topic) as a query and the older candidate groups as documents.
+4. Ranks candidates by cosine similarity plus a small recency bonus, then keeps the highest-scoring groups that still fit the token budget. Kept groups are restored to chronological order.
+5. Stores every omitted group, including its embedding when the server responded, in the profile-local SQLite archive.
 
-The active engine exposes `nemotron_context_search`, allowing Hermes to recover
-details from omitted turns. If the embedding server is unavailable during
-compaction, the engine uses a recency-based fallback and still archives omitted
-content. Embedding quality can reduce downstream input and repeated-search
-tokens, but savings vary by conversation and provider cache behavior.
+The token budget is `max(1024, context_length * target_ratio)`. Hermes' fixed
+overhead (system prompt and tool schemas) counts against that budget. If the
+embedding server errors, compaction falls back to recency order and still
+archives the omitted turns. If every candidate fits, or the result would not
+shrink the request, the original message list is returned unchanged so Hermes
+does not rotate the session for zero savings.
+
+The active engine exposes `nemotron_context_search`. Hermes can call it to
+recover omitted turns for the current session and for ancestor sessions
+created by compression. A lineage link that would make two sessions see each
+other is ignored. Search uses the stored vectors when their dimension matches
+the query vector, and otherwise falls back to lexical overlap. ASCII words are
+matched directly. Unspaced text such as Chinese or Japanese is indexed as
+overlapping bigrams so a short query can hit a longer turn. Each result's
+`content` is capped at 4,000 characters and `truncated` says when the stored
+text was longer.
+
+`memory_context` from newer Hermes hosts is accepted and ignored. Provider
+memory is not mixed into the retrieval query.
 
 ## Configuration
 
-`hermes nemotron-embed setup` writes these settings under `nemotron_embed` in
-the active profile's `config.yaml`:
+`hermes nemotron-embed setup` writes these keys under `nemotron_embed` and sets
+`context.engine`:
 
 ```yaml
 nemotron_embed:
@@ -148,31 +166,49 @@ nemotron_embed:
   api_key_env: NEMOTRON_EMBED_API_KEY
   threshold: 0.75
   target_ratio: 0.35
-  protect_first_turns: 1
-  protect_last_turns: 4
-  request_timeout: 120
-  embedding_dimensions: 1024
-  max_chunk_chars: 12000
-  recency_weight: 0.05
 
 context:
   engine: nemotron-embed
 ```
 
-Vectors are sliced to `embedding_dimensions` and re-normalized, following the
-model card's Matryoshka-style dimension guidance. A smaller value reduces
-archive size and similarity-scan cost.
+A trailing slash on the endpoint is stripped before it is saved. `threshold`
+must be from 0.25 through 0.95, `target_ratio` must be from 0.05 through 0.90,
+and `target_ratio` must be lower than `threshold`. The endpoint must be an
+`http` or `https` URL without embedded credentials. Boolean values are
+rejected for numeric settings.
+
+These optional keys use the defaults below when they are absent. Edit them in
+`config.yaml`; `setup` preserves values that are already there.
+
+| Key | Default | Meaning |
+|---|---|---|
+| `protect_first_turns` | 1 | Leading turn groups always kept (0–20) |
+| `protect_last_turns` | 4 | Trailing turn groups always kept (1–50) |
+| `request_timeout` | 120 | Embedding HTTP timeout in seconds (1–600) |
+| `embedding_dimensions` | 1024 | Prefix of each vector kept and re-normalized (128–4096) |
+| `max_chunk_chars` | 12000 | Characters of each turn group sent to the embedder |
+| `recency_weight` | 0.05 | Added to cosine after scaling position to 0–1 (0–0.5) |
+| `archive_path` | `$HERMES_HOME/nemotron-embed/archive.db` | SQLite archive location |
+
+The model card states that Nemotron-3-Embed-1B-BF16 returns a 2048-dimensional
+vector and that a prefix remains usable after it is sliced and L2-normalized.
+`embedding_dimensions` is that prefix. A smaller value makes the archive
+smaller and the in-process scan cheaper.
 
 State is profile scoped:
 
-- Archive: `$HERMES_HOME/nemotron-embed/archive.db`
-- Server state: `$HERMES_HOME/nemotron-embed/server.json`
-- Server log: `$HERMES_HOME/nemotron-embed/vllm.log`
+- Archive: `$HERMES_HOME/nemotron-embed/archive.db` (mode `0600`; the `nemotron-embed` directory is `0700`)
+- WAL/SHM sidecars, when SQLite creates them: mode `0600`
+- Server state: `$HERMES_HOME/nemotron-embed/server.json` (mode `0600`)
+- Server log: `$HERMES_HOME/nemotron-embed/vllm.log` (mode `0600`)
 
-No conversation text is sent anywhere except the configured embedding
-endpoint. The default endpoint is local. Archived conversation turns are stored
-as plaintext in the profile-local SQLite database; protect the Hermes profile
-directory and its backups as you would the original conversation history.
+Conversation text is sent only to the configured embedding endpoint. Archived
+turns are plaintext in that SQLite database. Treat the Hermes profile
+directory, its WAL files, and its backups as conversation history. `stop`
+signals only the process recorded in `server.json`, and only when the recorded
+start time still matches, so a recycled PID is not killed.
+
+See `examples/config.yaml` for a full profile snippet.
 
 ## Operations
 
@@ -184,14 +220,18 @@ hermes nemotron-embed benchmark
 hermes plugins update nemotron-embed
 ```
 
-`benchmark` runs a deterministic end-to-end smoke scenario against the
-configured embedding endpoint and reports estimated request-token reduction,
-relevant-turn retention, archive recovery, and user/assistant turn atomicity.
-It is a deployment check, not a claim about production savings or a substitute
-for workload-specific evaluation.
+`status` prints JSON. `server.running` means this profile owns a live process.
+`server.healthy` means a one-string `/v2/embed` probe succeeded, including for
+an endpoint you started yourself. `start` and `stop` print a short status
+block. `start --no-wait` returns after the process is recorded. `benchmark`
+prints a JSON report and the word `passed` or `failed` on stderr. A failed
+benchmark raises so the Hermes command exits unsuccessfully. The report checks
+that the smoke conversation shrank, that one planted fact stayed in context,
+that an omitted turn can be searched back, and that user/assistant pairs were
+not split. It is a deployment check for the configured endpoint, not a
+production savings claim.
 
-To roll back safely, select Hermes' built-in compressor before disabling or
-removing the plugin:
+To roll back, select Hermes' built-in compressor before disabling the plugin:
 
 ```bash
 hermes nemotron-embed stop
@@ -200,51 +240,59 @@ hermes plugins disable nemotron-embed
 hermes plugins remove nemotron-embed
 ```
 
-The SQLite archive is retained under `$HERMES_HOME/nemotron-embed/` so removal
-does not silently delete conversation data.
+Removal leaves `$HERMES_HOME/nemotron-embed/` in place.
+
+If `nemotron_embed` in `config.yaml` is invalid, the plugin still registers
+the CLI so `setup` can repair it, and it does not register the context engine.
+Hermes keeps using its built-in compressor until the config is valid.
+`status` prints the validation error and the repair command.
 
 ## Model and software licenses
 
-This plugin's source code is MIT licensed. NVIDIA's model weights and model
-configuration are separate artifacts licensed under the OpenMDW License
-Agreement 1.1. Review the model card and its license before downloading or
-deploying a checkpoint:
+This plugin's source code is MIT licensed. See [LICENSE](LICENSE). NVIDIA's
+model weights and model configuration are separate artifacts under the
+OpenMDW License Agreement 1.1. Read the model card before downloading a
+checkpoint:
 
 - [Nemotron-3-Embed-1B-BF16](https://huggingface.co/nvidia/Nemotron-3-Embed-1B-BF16)
 - [Nemotron-3-Embed-8B-BF16](https://huggingface.co/nvidia/Nemotron-3-Embed-8B-BF16)
 
 ## Related Hermes projects
 
-- [hermes-cmx](https://github.com/arminanton/hermes-cmx) — retrieval-first,
-  verbatim context assembly with hybrid search and optional grounding.
-- [hermes-cursor-compressor](https://github.com/thiswind/hermes-cursor-compressor)
-  — Cursor-style summarization and searchable JSONL history.
-- [hermes-mastra](https://github.com/srinitude/hermes-mastra) — a broader Mastra
-  memory provider with semantic-search tools and an optional context wrapper.
-- [Hermes context-engine documentation](https://github.com/NousResearch/hermes-agent/blob/main/website/docs/developer-guide/context-engine-plugin.md)
-  — the host contract implemented by this plugin.
+- [hermes-cmx](https://github.com/arminanton/hermes-cmx) — retrieval-first, verbatim context assembly with hybrid search and optional grounding.
+- [hermes-cursor-compressor](https://github.com/thiswind/hermes-cursor-compressor) — Cursor-style summarization and searchable JSONL history.
+- [hermes-mastra](https://github.com/srinitude/hermes-mastra) — a broader Mastra memory provider with semantic-search tools and an optional context wrapper.
+- [Hermes context-engine documentation](https://github.com/NousResearch/hermes-agent/blob/main/website/docs/developer-guide/context-engine-plugin.md) — the host contract this plugin implements.
 
 ## Development
 
-Run tests with a Hermes checkout on `PYTHONPATH`:
+The plugin is a flat Hermes plugin directory (`package = false` in
+`pyproject.toml`). Tests import it from this checkout. They also import the
+pinned Hermes host, because the engine subclasses `agent.context_engine.ContextEngine`.
 
 ```bash
-PYTHONPATH=/path/to/hermes-agent python -m pytest
-ruff check .
+uv sync --group dev
+git clone https://github.com/NousResearch/hermes-agent.git .hermes-agent
+git -C .hermes-agent fetch --depth 1 origin 74fc222f17d5fa10400dbd35d75d45f5ae75df8c
+git -C .hermes-agent checkout --detach FETCH_HEAD
+uv sync --project .hermes-agent --locked --extra dev --python 3.12
+PYTHONPATH=.hermes-agent .hermes-agent/.venv/bin/python -m pytest
+uv run ruff check .
+uv run ruff format --check .
+python3 scripts/scan_secrets.py
 ```
 
-Tests use a fake embedding client and temporary SQLite databases; they do not
-download model weights or make network calls.
+`.hermes-agent/` is gitignored. CI runs that pytest suite on Python 3.11, 3.12,
+and 3.13, then `ruff check`, `ruff format --check`, and `scripts/scan_secrets.py`.
+Dev dependencies are pinned in `uv.lock` (`pytest==9.0.2`, `ruff==0.15.10`).
 
-With a compatible server running, exercise the real retrieval path with the
-deterministic integration smoke eval:
+With a compatible server already running, the stdlib smoke eval reports
+Recall@1, Recall@3, MRR, dimensions, and batch latency for a small fixed
+corpus. It does not download weights by itself. It is a serving check, not an
+RTEB score:
 
 ```bash
 python evals/retrieval_smoke.py \
   --endpoint http://127.0.0.1:8089/v2/embed \
   --label local-gpu
 ```
-
-This reports Recall@1, Recall@3, MRR, dimensions, and batch latency over a
-small assistant-memory corpus. It validates serving and query/document prompt
-handling; it is not a substitute for RTEB or a production workload benchmark.

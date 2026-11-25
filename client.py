@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import json
 import math
+import urllib.request
 from collections.abc import Callable, Sequence
 from typing import Any
 from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
+from urllib.request import Request
 
 
 class EmbeddingError(RuntimeError):
@@ -25,14 +26,16 @@ class NemotronClient:
         timeout: float,
         dimensions: int,
         api_key: str | None = None,
-        opener: Callable[..., Any] = urlopen,
+        opener: Callable[..., Any] | None = None,
     ) -> None:
         self.endpoint = endpoint
         self.model = model
         self.timeout = timeout
         self.dimensions = dimensions
         self.api_key = api_key
-        self._opener = opener
+        # Default transport ignores HTTP(S)_PROXY and refuses redirects so a
+        # local embedding call cannot be replayed at another origin.
+        self._opener = opener or _open_refusing_redirects
 
     def embed(self, input_type: str, texts: Sequence[str]) -> list[list[float]]:
         """Embed query or document text using NVIDIA's saved prompt metadata."""
@@ -61,7 +64,7 @@ class NemotronClient:
             with self._opener(request, timeout=self.timeout) as response:
                 data = json.loads(response.read().decode("utf-8"))
         except HTTPError as exc:
-            detail = exc.read().decode("utf-8", errors="replace")[:500]
+            detail = _http_error_detail(exc)
             raise EmbeddingError(f"embedding server returned HTTP {exc.code}: {detail}") from exc
         except (URLError, TimeoutError, OSError) as exc:
             raise EmbeddingError(f"embedding server is unavailable: {exc}") from exc
@@ -96,6 +99,31 @@ class NemotronClient:
         if norm <= 0:
             raise EmbeddingError("embedding response contains a zero vector")
         return [value / norm for value in vector]
+
+
+class _RejectRedirects(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        raise EmbeddingError(
+            f"embedding server returned HTTP {code} redirect; refusing to follow it"
+        )
+
+
+def _open_refusing_redirects(request: Request, timeout: float = 0):
+    opener = urllib.request.build_opener(
+        urllib.request.ProxyHandler({}),
+        _RejectRedirects,
+    )
+    return opener.open(request, timeout=timeout)
+
+
+def _http_error_detail(exc: HTTPError) -> str:
+    try:
+        raw = exc.read()
+    except Exception:
+        raw = b""
+    if isinstance(raw, bytes):
+        return raw.decode("utf-8", errors="replace")[:500]
+    return str(raw)[:500]
 
 
 def dot_product(left: Sequence[float], right: Sequence[float]) -> float:
