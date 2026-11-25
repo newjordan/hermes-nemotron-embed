@@ -105,8 +105,11 @@ def _bounded_float(
     minimum: float,
     maximum: float,
 ) -> float:
+    raw = values.get(key, default)
+    if isinstance(raw, bool):
+        raise ValueError(f"nemotron_embed.{key} must be a number")
     try:
-        value = float(values.get(key, default))
+        value = float(raw)
     except (TypeError, ValueError) as exc:
         raise ValueError(f"nemotron_embed.{key} must be a number") from exc
     if not minimum <= value <= maximum:

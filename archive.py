@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import sqlite3
 import time
 from array import array
@@ -13,6 +14,8 @@ from pathlib import Path
 from typing import Any
 
 from .client import dot_product
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -40,11 +43,12 @@ class ContextArchive:
         messages: list[dict[str, Any]],
         embedding: Sequence[float] | None,
     ) -> str:
-        canonical = json.dumps(messages, sort_keys=True, ensure_ascii=False)
+        canonical = json.dumps(messages, sort_keys=True, ensure_ascii=False, default=str)
         chunk_id = hashlib.sha256(f"{session_id}\0{sequence}\0{canonical}".encode()).hexdigest()[
             :20
         ]
-        blob = _vector_to_blob(embedding) if embedding is not None else None
+        # An empty vector must not overwrite a previously stored embedding.
+        blob = _vector_to_blob(embedding) if embedding else None
         self._ensure_parent()
         with self._connect() as conn:
             self._create_schema(conn)
@@ -58,7 +62,10 @@ class ContextArchive:
                     text = excluded.text,
                     messages_json = excluded.messages_json,
                     embedding = COALESCE(excluded.embedding, chunks.embedding),
-                    dimensions = MAX(excluded.dimensions, chunks.dimensions)
+                    dimensions = CASE
+                        WHEN excluded.embedding IS NOT NULL THEN excluded.dimensions
+                        ELSE chunks.dimensions
+                    END
                 """,
                 (
                     chunk_id,
@@ -80,6 +87,16 @@ class ContextArchive:
         self._ensure_parent()
         with self._connect() as conn:
             self._create_schema(conn)
+            # Walk the parent's ancestors. If the child is already above the
+            # parent, recording the reverse edge would make both sessions
+            # searchable from each other.
+            if _ancestors_include(conn, start=parent_session_id, target=child_session_id):
+                logger.warning(
+                    "Refusing session lineage link that would cycle: %s -> %s",
+                    child_session_id,
+                    parent_session_id,
+                )
+                return
             conn.execute(
                 """
                 INSERT INTO session_lineage (child_session_id, parent_session_id)
@@ -178,17 +195,30 @@ class ContextArchive:
         return int(row[0]) if row else 0
 
     def _ensure_parent(self) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        parent = self.path.parent
+        created = not parent.exists()
+        parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        # Tighten the directory we just created, and the default plugin
+        # state directory even when an older install left it world-readable.
+        # Leave an operator-chosen parent that already existed alone.
+        if created or parent.name == "nemotron-embed":
+            try:
+                parent.chmod(0o700)
+            except OSError:
+                logger.warning("Could not restrict permissions on %s", parent)
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.path, timeout=10.0)
         try:
-            self.path.chmod(0o600)
-        except OSError:
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA synchronous=NORMAL")
+            conn.execute("PRAGMA secure_delete=ON")
+            _chmod_private(self.path)
+            for suffix in ("-wal", "-shm"):
+                _chmod_private(self.path.with_name(self.path.name + suffix), required=False)
+        except Exception:
             conn.close()
             raise
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA synchronous=NORMAL")
         return conn
 
     @staticmethod
@@ -223,6 +253,34 @@ class ContextArchive:
         )
 
 
+def _ancestors_include(conn: sqlite3.Connection, *, start: str, target: str) -> bool:
+    row = conn.execute(
+        """
+        WITH RECURSIVE ancestors(session_id) AS (
+            VALUES (?)
+            UNION
+            SELECT links.parent_session_id
+              FROM session_lineage AS links
+              JOIN ancestors ON links.child_session_id = ancestors.session_id
+        )
+        SELECT 1 FROM ancestors WHERE session_id = ? LIMIT 1
+        """,
+        (start, target),
+    ).fetchone()
+    return row is not None
+
+
+def _chmod_private(path: Path, *, required: bool = True) -> None:
+    try:
+        if path.exists():
+            path.chmod(0o600)
+        elif required:
+            raise OSError(f"missing private file: {path}")
+    except OSError:
+        if required:
+            raise
+
+
 def _vector_to_blob(vector: Sequence[float]) -> bytes:
     values = array("f", (float(value) for value in vector))
     return values.tobytes()
@@ -237,17 +295,41 @@ def _blob_to_vector(blob: bytes, dimensions: int) -> list[float]:
 
 
 def _terms(text: str) -> set[str]:
-    return {token.casefold() for token in _word_tokens(text) if len(token) >= 2}
+    """Index ASCII words and overlapping bigrams for unspaced scripts.
+
+    Lexical search is the fallback when the embedding server is down.
+    Chinese and Japanese turns have no spaces, so treating a whole sentence
+    as one token makes a short query miss the archived text.
+    """
+    terms: set[str] = set()
+    for token in _word_tokens(text):
+        folded = token.casefold()
+        if folded.isascii():
+            if len(folded) >= 2:
+                terms.add(folded)
+            continue
+        if len(folded) == 1:
+            terms.add(folded)
+            continue
+        terms.update(folded[index : index + 2] for index in range(len(folded) - 1))
+    return terms
 
 
 def _word_tokens(text: str) -> Iterable[str]:
     current: list[str] = []
+    current_ascii: bool | None = None
     for char in text:
         if char.isalnum() or char == "_":
+            is_ascii = char.isascii()
+            if current and current_ascii != is_ascii:
+                yield "".join(current)
+                current = []
             current.append(char)
+            current_ascii = is_ascii
         elif current:
             yield "".join(current)
             current = []
+            current_ascii = None
     if current:
         yield "".join(current)
 

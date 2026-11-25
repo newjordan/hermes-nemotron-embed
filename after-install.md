@@ -8,7 +8,8 @@ hermes nemotron-embed setup --start
 
 The first start creates an isolated `uvx` environment and downloads the model,
 so it can take several minutes. Managed serving requires Linux or WSL2 with a
-supported NVIDIA GPU. Run `hermes nemotron-embed status` to verify readiness.
+supported NVIDIA GPU, binds to loopback, and uses vLLM's pooling runner.
+Run `hermes nemotron-embed status` to verify the embedding endpoint answers.
 
 To use an existing vLLM server instead:
 

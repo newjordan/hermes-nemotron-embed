@@ -113,9 +113,61 @@ def test_usage_threshold_and_reset_contract(tmp_path):
     assert engine.should_compress() is True
     assert engine.last_completion_tokens == 200
     engine.on_session_start("session")
+    engine._last_backend = "nemotron"
     engine.on_session_reset()
     assert engine.last_prompt_tokens == 0
     assert engine.compression_count == 0
+    assert engine.get_status()["last_compaction_backend"] == "not-run"
+
+
+def test_memory_context_does_not_replace_the_conversation_query(tmp_path):
+    engine = NemotronEmbedEngine(_settings(tmp_path), client=_SemanticClient())
+    engine.update_model("chat-model", context_length=4000)
+    engine.on_session_start("session")
+
+    result = engine.compress(
+        _messages(),
+        current_tokens=1800,
+        memory_context="beta-archive provider memory with no alpha token",
+    )
+
+    assert "alpha-relevant" in json.dumps(result)
+
+
+def test_nonserializable_tool_call_does_not_abort_compaction(tmp_path):
+    engine = NemotronEmbedEngine(_settings(tmp_path), client=_SemanticClient())
+    engine.update_model("chat-model", context_length=4000)
+    engine.on_session_start("session")
+    messages = _messages()
+    messages[2]["tool_calls"] = [{"id": "call", "args": {"bad": object()}}]
+
+    result = engine.compress(messages, current_tokens=1800)
+
+    assert isinstance(result, list)
+
+
+def test_search_limit_bool_uses_the_default(tmp_path):
+    settings = _settings(tmp_path)
+    archive = ContextArchive(settings.archive_path)
+    engine = NemotronEmbedEngine(settings, client=_UnavailableClient(), archive=archive)
+    engine.on_session_start("session")
+    archive.store(
+        session_id="session",
+        sequence=0,
+        text="the staging codename is bluebird",
+        messages=[{"role": "user", "content": "staging codename bluebird"}],
+        embedding=None,
+    )
+
+    response = json.loads(
+        engine.handle_tool_call(
+            "nemotron_context_search",
+            {"query": "staging codename", "limit": True},
+        )
+    )
+
+    assert response["success"] is True
+    assert response["results"]
 
 
 def test_search_tool_rejects_empty_query(tmp_path):

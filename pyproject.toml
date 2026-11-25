@@ -1,3 +1,31 @@
+[project]
+name = "hermes-nemotron-embed"
+version = "0.1.1"
+description = "Local Nemotron semantic context compaction for Hermes Agent"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "newjordan" }]
+dependencies = [
+  # Same psutil release as the Hermes 0.18.2 host this plugin is tested against.
+  # Process checks fall back to /proc and os.kill if the import is missing.
+  "psutil==7.2.2",
+]
+
+[project.urls]
+Homepage = "https://github.com/newjordan/hermes-nemotron-embed"
+Repository = "https://github.com/newjordan/hermes-nemotron-embed"
+
+[dependency-groups]
+dev = [
+  "pytest==9.0.2",
+  "ruff==0.15.10",
+]
+
+[tool.uv]
+package = false
+
 [tool.pytest.ini_options]
 addopts = "-q"
 testpaths = ["tests"]
